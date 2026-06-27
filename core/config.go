@@ -657,26 +657,6 @@ func (c *Config) CleanUp() {
 		}
 	}
 	c.SavePhishlets()
-	/*
-		var sites_enabled []string
-		var sites_hidden []string
-		for k := range c.siteDomains {
-			_, err := c.GetPhishlet(k)
-			if err != nil {
-				delete(c.siteDomains, k)
-			} else {
-				if c.IsSiteEnabled(k) {
-					sites_enabled = append(sites_enabled, k)
-				}
-				if c.IsSiteHidden(k) {
-					sites_hidden = append(sites_hidden, k)
-				}
-			}
-		}
-		c.cfg.Set(CFG_SITE_DOMAINS, c.siteDomains)
-		c.cfg.Set(CFG_SITES_ENABLED, sites_enabled)
-		c.cfg.Set(CFG_SITES_HIDDEN, sites_hidden)
-		c.cfg.WriteConfig()*/
 }
 
 func (c *Config) AddLure(site string, l *Lure) {
