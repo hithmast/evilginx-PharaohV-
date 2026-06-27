@@ -1,11 +1,16 @@
 TARGET=evilginx
-PACKAGES=core database log parser
 
-.PHONY: all build clean
+.PHONY: all build test vet clean
 all: build
 
 build:
 	@go build -o ./build/$(TARGET) -mod=vendor main.go
+
+test:
+	@go test -mod=vendor ./...
+
+vet:
+	@go vet -mod=vendor ./...
 
 clean:
 	@go clean
