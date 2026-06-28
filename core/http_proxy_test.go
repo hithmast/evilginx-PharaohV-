@@ -2,8 +2,10 @@ package core
 
 import (
 	"encoding/base64"
+	"fmt"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -149,5 +151,43 @@ func TestSetJSONVariable(t *testing.T) {
 
 	if _, err := SetJSONVariable([]byte(`not json`), "b", "x"); err == nil {
 		t.Error("expected error on invalid JSON input")
+	}
+}
+
+// TestSessionMapConcurrentAccess exercises the session maps from many goroutines
+// at once, mirroring goproxy's one-goroutine-per-connection handler model. It is
+// meant to be run under `go test -race`: without the mutex guarding p.sessions /
+// p.sids it reports a data race (or panics with "concurrent map ... write").
+func TestSessionMapConcurrentAccess(t *testing.T) {
+	p := &HttpProxy{
+		sessions: make(map[string]*Session),
+		sids:     make(map[string]int),
+	}
+
+	const workers = 50
+	const iterations = 200
+
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			for i := 0; i < iterations; i++ {
+				id := fmt.Sprintf("sess-%d-%d", w, i)
+				s, _ := NewSession("test")
+				p.addSession(id, s, w*iterations+i)
+				if _, ok := p.getSession(id); !ok {
+					t.Errorf("session %q not found immediately after addSession", id)
+				}
+				p.getSid(id)
+				// also read a shared, possibly-not-yet-written key to mix reads/writes
+				p.getSession("sess-0-0")
+			}
+		}(w)
+	}
+	wg.Wait()
+
+	if _, ok := p.getSession("sess-0-0"); !ok {
+		t.Error("expected sentinel session to be present after all workers finished")
 	}
 }
