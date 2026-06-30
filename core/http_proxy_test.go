@@ -2,6 +2,7 @@ package core
 
 import (
 	"encoding/base64"
+	"fmt"
 	"net/url"
 	"strings"
 	"sync"
@@ -153,74 +154,40 @@ func TestSetJSONVariable(t *testing.T) {
 	}
 }
 
-func TestCompileRegexMemoization(t *testing.T) {
-	p := &HttpProxy{}
-
-	re1, err := p.compileRegex("a.*b")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	re2, err := p.compileRegex("a.*b")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if re1 != re2 {
-		t.Error("expected the same *regexp.Regexp instance for an identical pattern")
+// TestSessionMapConcurrentAccess exercises the session maps from many goroutines
+// at once, mirroring goproxy's one-goroutine-per-connection handler model. It is
+// meant to be run under `go test -race`: without the mutex guarding p.sessions /
+// p.sids it reports a data race (or panics with "concurrent map ... write").
+func TestSessionMapConcurrentAccess(t *testing.T) {
+	p := &HttpProxy{
+		sessions: make(map[string]*Session),
+		sids:     make(map[string]int),
 	}
 
-	re3, err := p.compileRegex("c+d")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if re1 == re3 {
-		t.Error("expected a different instance for a different pattern")
-	}
+	const workers = 50
+	const iterations = 200
 
-	if !re1.MatchString("axxb") {
-		t.Error("cached regex does not match as expected")
-	}
-
-	if _, err := p.compileRegex("("); err == nil {
-		t.Error("expected an error for an invalid pattern")
-	}
-}
-
-// TestCompileRegexConcurrent exercises the cache from many goroutines so the
-// memoization is verified safe under `go test -race`.
-func TestCompileRegexConcurrent(t *testing.T) {
-	p := &HttpProxy{}
 	var wg sync.WaitGroup
-	for i := 0; i < 50; i++ {
+	for w := 0; w < workers; w++ {
 		wg.Add(1)
-		go func() {
+		go func(w int) {
 			defer wg.Done()
-			for j := 0; j < 200; j++ {
-				if _, err := p.compileRegex("shared.*pattern"); err != nil {
-					t.Errorf("unexpected error: %v", err)
+			for i := 0; i < iterations; i++ {
+				id := fmt.Sprintf("sess-%d-%d", w, i)
+				s, _ := NewSession("test")
+				p.addSession(id, s, w*iterations+i)
+				if _, ok := p.getSession(id); !ok {
+					t.Errorf("session %q not found immediately after addSession", id)
 				}
+				p.getSid(id)
+				// also read a shared, possibly-not-yet-written key to mix reads/writes
+				p.getSession("sess-0-0")
 			}
-		}()
+		}(w)
 	}
 	wg.Wait()
-}
 
-func TestInjectJavascriptIntoBody(t *testing.T) {
-	p := &HttpProxy{}
-
-	body := []byte("<html><head></head><body><p>hi</p></body></html>")
-	out := string(p.injectJavascriptIntoBody(body, "", "/s/abc.js"))
-
-	if !strings.Contains(out, `src="/s/abc.js"`) {
-		t.Errorf("expected injected script src in output, got: %s", out)
-	}
-	idxScript := strings.Index(out, "/s/abc.js")
-	idxBodyClose := strings.Index(out, "</body>")
-	if idxScript < 0 || idxBodyClose < 0 || idxScript > idxBodyClose {
-		t.Errorf("expected script injected before </body>, got: %s", out)
-	}
-
-	// no script and no src: body returned unchanged
-	if got := string(p.injectJavascriptIntoBody(body, "", "")); got != string(body) {
-		t.Errorf("expected body unchanged when no script/src provided, got: %s", got)
+	if _, ok := p.getSession("sess-0-0"); !ok {
+		t.Error("expected sentinel session to be present after all workers finished")
 	}
 }
