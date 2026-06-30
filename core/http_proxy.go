@@ -1619,6 +1619,10 @@ func (p *HttpProxy) httpsWorker() {
 	for p.isRunning {
 		c, err := p.sniListener.Accept()
 		if err != nil {
+			if !p.isRunning {
+				// listener was closed by Stop(); exit quietly
+				break
+			}
 			log.Error("Error accepting connection: %s", err)
 			continue
 		}
@@ -1871,6 +1875,15 @@ func (p *HttpProxy) injectOgHeaders(l *Lure, body []byte) []byte {
 func (p *HttpProxy) Start() error {
 	go p.httpsWorker()
 	return nil
+}
+
+// Stop signals httpsWorker to exit and closes the TLS listener to unblock the
+// pending Accept call. Safe to call once during shutdown.
+func (p *HttpProxy) Stop() {
+	p.isRunning = false
+	if p.sniListener != nil {
+		p.sniListener.Close()
+	}
 }
 
 func (p *HttpProxy) whitelistIP(ip_addr string, sid string, pl_name string) {
